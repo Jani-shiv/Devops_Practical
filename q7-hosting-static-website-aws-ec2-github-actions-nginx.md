@@ -1,37 +1,84 @@
 # Practical 7: Hosting a Static Website on AWS EC2 using GitHub Actions (CI/CD) using Ubuntu Server + Nginx
 
 ## Objective
-Build an automated CI/CD pipeline using GitHub Actions to continuously deploy static website updates to an AWS EC2 Ubuntu instance hosting Nginx.
+Build an automated CI/CD pipeline using GitHub Actions to continuously deploy static website updates from a dedicated source folder in the repository to a dedicated site root on an AWS EC2 Ubuntu instance running Nginx.
 
 ## Prerequisites
-- AWS EC2 instance running Ubuntu with Nginx installed.
-- Security Group open on Port 22 (SSH) and Port 80 (HTTP).
-- GitHub repository with website files (`index.html`, etc.).
+- AWS EC2 instance running Ubuntu.
+- Security Group open on:
+  - SSH (Port 22) allowed from GitHub Actions runner IPs or specific bastion IP.
+  - HTTP (Port 80) allowed from anywhere (`0.0.0.0/0`).
+- GitHub repository with website source files located in `src/`.
+
+## Repository Project Structure
+```text
+my-static-site/
+├── src/
+│   ├── index.html
+│   ├── style.css
+│   └── script.js
+└── .github/
+    └── workflows/
+        └── deploy-nginx.yml
+```
 
 ## What We Need To Do
-1. Configure Nginx web root directory permissions on EC2.
-2. Add EC2 connection credentials to GitHub Secrets.
-3. Create GitHub Actions workflow to transfer files via SCP/SSH and restart Nginx.
-4. Push a code change to verify automatic deployment.
+1. Configure Nginx on EC2 with a dedicated web root (`/var/www/my-site`) with proper ownership for user `ubuntu`.
+2. Add SSH secrets (`EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`) to GitHub Secrets.
+3. Author a GitHub Actions workflow that transfers only the contents of `src/` to the destination directory, avoiding missing-path errors.
+4. Test Nginx syntax and reload Nginx service.
+5. Push a code change to verify automatic deployment.
+
+---
 
 ## How To Do It (Step-by-Step Instructions)
 
-### Step 1: Prepare EC2 Server permissions
-Connect to EC2 and set ownership of the web root to user `ubuntu`:
+### Step 1: Prepare EC2 Server & Dedicated Directory
+Connect to your EC2 instance via SSH:
 ```bash
 ssh -i "my-key.pem" ubuntu@<EC2-PUBLIC-IP>
+```
+Install Nginx and create dedicated web directory:
+```bash
 sudo apt update -y && sudo apt install nginx -y
-sudo chown -R ubuntu:ubuntu /var/www/html
+
+# Create dedicated directory with ownership for deployment user
+sudo mkdir -p /var/www/my-site
+sudo chown -R ubuntu:ubuntu /var/www/my-site
+sudo chmod -R 755 /var/www/my-site
+```
+
+Configure Nginx server block for `/var/www/my-site`:
+```bash
+sudo tee /etc/nginx/sites-available/my-site << 'EOF'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+
+    root /var/www/my-site;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo ln -sf /etc/nginx/sites-available/my-site /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
 ```
 
 ### Step 2: Configure GitHub Secrets
 In your GitHub repository, navigate to **Settings** -> **Secrets and variables** -> **Actions** -> **New repository secret**:
 - `EC2_HOST`: `<EC2-PUBLIC-IP>`
 - `EC2_USER`: `ubuntu`
-- `EC2_SSH_KEY`: Paste the full content of your private `.pem` key file.
+- `EC2_SSH_KEY`: Entire contents of your private `.pem` key file (including `-----BEGIN RSA PRIVATE KEY-----` and `-----END RSA PRIVATE KEY-----`).
 
 ### Step 3: Create GitHub Actions Workflow
-Create file `.github/workflows/deploy-nginx.yml`:
+In your repository, create `.github/workflows/deploy-nginx.yml`:
 ```yaml
 name: Deploy Static Website to EC2 Nginx
 
@@ -46,27 +93,28 @@ jobs:
       - name: Checkout repository code
         uses: actions/checkout@v4
 
-      - name: Copy static files to EC2 Nginx web root
+      - name: Transfer static assets to EC2 via SCP
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "index.html,css,js,images"
-          target: "/var/www/html"
+          source: "src/*"
+          target: "/var/www/my-site"
+          strip_components: 1
 
-      - name: Restart Nginx on EC2
+      - name: Validate and Reload Nginx
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            sudo systemctl restart nginx
+            sudo nginx -t
+            sudo systemctl reload nginx
 ```
 
-### Step 4: Verify deployment
-1. Commit any change to `index.html` and push to branch `main`.
-2. Go to the **Actions** tab on GitHub to monitor pipeline execution.
-3. Open `http://<EC2-PUBLIC-IP>` to view the deployed website.
-
+### Step 4: Verify Deployment
+1. Commit changes to `src/index.html` and push to `main`.
+2. Open the **Actions** tab on GitHub to monitor the pipeline.
+3. Open `http://<EC2-PUBLIC-IP>` to view the updated site.
